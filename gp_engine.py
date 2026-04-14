@@ -55,7 +55,7 @@ class Node:
 
 def generate_random_tree(depth=3):
     if depth <= 1 or np.random.rand() < 0.2:
-        return Node('x') if np.random.rand() > 0.4 else Node(float(np.random.randint(-10, 11)))
+        return Node('x') if np.random.rand() > 0.4 else Node(float(np.random.randint(-15, 16)))
     op = np.random.choice(list(operators.keys()))
     if op == 'pow':
         return Node(op, generate_random_tree(depth-1), Node(float(np.random.randint(0, 4))))
@@ -63,25 +63,28 @@ def generate_random_tree(depth=3):
 
 def mutate(tree):
     r = np.random.rand()
-    if r < 0.3 and isinstance(tree.value, (int, float)):
-        tree.value += np.random.normal(0, 2.0)
-    elif r < 0.5:
+    if isinstance(tree.value, (int, float)):
+        if r < 0.6:
+            tree.value += np.random.normal(0, 5.0)
+            return tree
+    
+    if r < 0.2:
         return generate_random_tree(depth=3)
-    else:
-        if tree.left and np.random.rand() < 0.5:
-            tree.left = mutate(tree.left)
-        elif tree.right:
-            tree.right = mutate(tree.right)
+    
+    if tree.left and np.random.rand() < 0.5:
+        tree.left = mutate(tree.left)
+    elif tree.right:
+        tree.right = mutate(tree.right)
     return tree
 
 def crossover(p1, p2):
-    child = p1.copy()
-    nodes_c = child.get_all_nodes()
+    c = p1.copy()
+    nodes_c = c.get_all_nodes()
     nodes_p2 = p2.get_all_nodes()
     target = np.random.choice(nodes_c)
     replacement = np.random.choice(nodes_p2).copy()
     target.value, target.left, target.right = replacement.value, replacement.left, replacement.right
-    return child
+    return c
 
 def final_simplify(node):
     x = sympy.Symbol('x')
