@@ -1,95 +1,78 @@
-import numpy as np
+import torch
 import sympy
 
-operators = {
-    'add': np.add,
-    'sub': np.subtract,
-    'mul': np.multiply,
-    'pow': lambda x, y: np.power(np.abs(x), np.clip(y, -4, 4))
-}
-
-class Node:
-    def __init__(self, value, left=None, right=None):
-        self.value = value
-        self.left = left
-        self.right = right
+class LGPEngine:
+    def __init__(self, pop_size, num_regs=6, max_instr=40, device='cuda'):
+        self.pop_size = pop_size
+        self.num_regs = num_regs
+        self.max_instr = max_instr
+        self.device = device
+        self.pop = torch.randint(0, num_regs, (pop_size, max_instr, 4), device=device)
+        self.pop[:, :, 1] = torch.randint(0, 3, (pop_size, max_instr), device=device)
 
     def evaluate(self, x):
-        if self.value == 'x': 
-            return x
-        if isinstance(self.value, (int, float)): 
-            return np.full_like(x, self.value)
+        n_pts = x.shape[0]
+        regs = torch.zeros((self.pop_size, self.num_regs, n_pts), device=self.device)
+        regs[:, 0, :] = x.expand(self.pop_size, n_pts)
         
-        l_val = self.left.evaluate(x)
-        r_val = self.right.evaluate(x)
-        
-        try:
-            res = operators[self.value](l_val, r_val)
-            return np.nan_to_num(res, nan=0.0, posinf=1e6, neginf=-1e6)
-        except:
-            return np.zeros_like(x)
+        for i in range(1, self.num_regs):
+            const_val = (i - self.num_regs//2) * 5.0
+            regs[:, i, :] = torch.full((self.pop_size, n_pts), const_val, device=self.device)
 
-    def copy(self):
-        return Node(self.value, self.left.copy() if self.left else None, self.right.copy() if self.right else None)
+        for i in range(self.max_instr):
+            instr = self.pop[:, i, :]
+            dst, op, s1, s2 = instr[:, 0], instr[:, 1], instr[:, 2], instr[:, 3]
+            
+            v1 = regs[torch.arange(self.pop_size), s1]
+            v2 = regs[torch.arange(self.pop_size), s2]
+            
+            res_add = v1 + v2
+            res_sub = v1 - v2
+            res_mul = v1 * v2
+            
+            ops_stack = torch.stack([res_add, res_sub, res_mul], dim=1)
+            regs[torch.arange(self.pop_size), dst] = ops_stack[torch.arange(self.pop_size), op]
+            
+        return torch.clamp(regs[:, 0, :], -1e6, 1e6)
 
-    def __str__(self):
-        if self.value == 'x': return "x"
-        if isinstance(self.value, (int, float)): return f"{self.value:.2f}"
-        if self.value == 'pow':
-            try:
-                exp = self.right.evaluate(np.array([1.0]))[0]
-                return f"({self.left}**{int(np.round(exp))})"
-            except:
-                return f"({self.left}**0)"
-        return f"({self.left} {self.value} {self.right})"
-
-    def get_depth(self):
-        if not self.left and not self.right: return 1
-        return 1 + max(self.left.get_depth() if self.left else 0, self.right.get_depth() if self.right else 0)
-
-    def get_all_nodes(self):
-        nodes = [self]
-        if self.left: nodes.extend(self.left.get_all_nodes())
-        if self.right: nodes.extend(self.right.get_all_nodes())
-        return nodes
-
-def generate_random_tree(depth=3):
-    if depth <= 1 or np.random.rand() < 0.2:
-        return Node('x') if np.random.rand() > 0.4 else Node(float(np.random.randint(-15, 16)))
-    op = np.random.choice(list(operators.keys()))
-    if op == 'pow':
-        return Node(op, generate_random_tree(depth-1), Node(float(np.random.randint(0, 4))))
-    return Node(op, generate_random_tree(depth-1), generate_random_tree(depth-1))
-
-def mutate(tree):
-    r = np.random.rand()
-    if isinstance(tree.value, (int, float)):
-        if r < 0.6:
-            tree.value += np.random.normal(0, 5.0)
-            return tree
+def evolve(engine, fitness):
+    pop_size, max_instr, _ = engine.pop.shape
+    idx = torch.argsort(fitness)
     
-    if r < 0.2:
-        return generate_random_tree(depth=3)
+    elites = engine.pop[idx[:pop_size // 10]]
     
-    if tree.left and np.random.rand() < 0.5:
-        tree.left = mutate(tree.left)
-    elif tree.right:
-        tree.right = mutate(tree.right)
-    return tree
+    p1 = elites[torch.randint(0, len(elites), (pop_size,))]
+    p2 = elites[torch.randint(0, len(elites), (pop_size,))]
+    
+    cp = torch.randint(0, max_instr, (pop_size, 1, 1), device=engine.device)
+    mask = torch.arange(max_instr, device=engine.device).view(1, -1, 1) < cp
+    offspring = torch.where(mask, p1, p2)
+    
+    mut_mask = torch.rand(offspring.shape, device=engine.device) < 0.08
+    mut_vals = torch.randint(0, engine.num_regs, offspring[mut_mask].shape, device=engine.device)
+    offspring[mut_mask] = mut_vals
+    offspring[:, :, 1] %= 3
+    
+    offspring[:len(elites)] = elites
+    engine.pop = offspring
 
-def crossover(p1, p2):
-    c = p1.copy()
-    nodes_c = c.get_all_nodes()
-    nodes_p2 = p2.get_all_nodes()
-    target = np.random.choice(nodes_c)
-    replacement = np.random.choice(nodes_p2).copy()
-    target.value, target.left, target.right = replacement.value, replacement.left, replacement.right
-    return c
-
-def final_simplify(node):
+def get_final_expression(best_individual, num_regs=6):
     x = sympy.Symbol('x')
-    raw = str(node).replace('add', '+').replace('sub', '-').replace('mul', '*').replace('pow', '**')
+    regs = [0.0] * num_regs
+    regs[0] = x
+    for i in range(1, num_regs):
+        regs[i] = float((i - num_regs//2) * 5.0)
+    
+    for i in range(best_individual.shape[0]):
+        dst, op, s1, s2 = map(int, best_individual[i])
+        v1, v2 = regs[s1], regs[s2]
+        if op == 0: res = v1 + v2
+        elif op == 1: res = v1 - v2
+        elif op == 2: res = v1 * v2
+        regs[dst] = res
+
+    final_expr = regs[0]
     try:
-        return sympy.expand(sympy.sympify(raw)).n(4)
+        return sympy.expand(final_expr)
     except:
-        return raw
+        return final_expr

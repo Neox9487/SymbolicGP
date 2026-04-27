@@ -1,93 +1,54 @@
-import numpy as np
+import torch
 import matplotlib.pyplot as plt
-from gp_engine import generate_random_tree, mutate, crossover, final_simplify
+from gp_engine import LGPEngine, evolve, get_final_expression
 
-def target_function(x):
+def target_func(x):
     return 3*(x**3) - 5*(x**2) + 20*x - 30
 
-X_SCOPE = 5
-POP_SIZE = 1200
-LOSS_THRESHOLD = 5.0
-MAX_DEPTH = 10
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+POP_SIZE = 8192
 MAX_GENS = 2000
-ELITE_SIZE = int(POP_SIZE * 0.05)
-STAGNATION_LIMIT = 40
+NUM_REGS = 6
+MAX_INSTR = 50
 
-x_train = np.linspace(-X_SCOPE, X_SCOPE, X_SCOPE*20)
-y_train = target_function(x_train) + np.random.normal(0, 0.5, size=x_train.shape)
+print(f"Running LGP on {DEVICE}")
 
-population = [generate_random_tree(depth=4) for _ in range(POP_SIZE)]
-best_overall_tree = None
-min_fitness = float('inf')
-gen = 0
-stagnation_counter = 0
+x_train = torch.linspace(-5, 5, 200, device=DEVICE)
+y_train = target_func(x_train)
 
-while min_fitness > LOSS_THRESHOLD and gen < MAX_GENS:
-    fitness_scores = []
-    for tree in population:
-        pred = tree.evaluate(x_train)
-        mse = np.mean((pred - y_train)**2)
-        complexity = str(tree).count('(') * 0.1
-        depth_penalty = max(0, tree.get_depth() - MAX_DEPTH) * 100
-        score = mse + complexity + depth_penalty
-        fitness_scores.append(score if np.isfinite(score) else 1e9)
+engine = LGPEngine(POP_SIZE, NUM_REGS, MAX_INSTR, DEVICE)
+
+for gen in range(MAX_GENS):
+    preds = engine.evaluate(x_train)
+    mse = torch.mean((preds - y_train)**2, dim=1)
+    mse = torch.nan_to_num(mse, nan=1e12, posinf=1e12)
     
-    fitness_scores = np.array(fitness_scores)
-    sorted_indices = np.argsort(fitness_scores)
-    current_best_score = fitness_scores[sorted_indices[0]]
-
-    if current_best_score < min_fitness - 0.01:
-        min_fitness = current_best_score
-        best_overall_tree = population[sorted_indices[0]].copy()
-        stagnation_counter = 0
-    else:
-        stagnation_counter += 1
-
-    if gen % 10 == 0:
-        print(f"Gen {gen:03d} | Loss: {min_fitness:.2f} | Stagnation: {stagnation_counter}")
-
-    next_gen = [population[i].copy() for i in sorted_indices[:ELITE_SIZE]]
+    best_val, best_idx = torch.min(mse, 0)
     
-    if stagnation_counter > STAGNATION_LIMIT:
-        while len(next_gen) < POP_SIZE:
-            r = np.random.rand()
-            if r < 0.7:
-                next_gen.append(generate_random_tree(depth=np.random.randint(3, 7)))
-            else:
-                p = population[np.random.choice(sorted_indices[:10])].copy()
-                next_gen.append(mutate(mutate(p)))
-        stagnation_counter = 0
-    else:
-        while len(next_gen) < POP_SIZE:
-            r = np.random.rand()
-            if r < 0.75:
-                p1 = population[np.random.choice(sorted_indices[:25])]
-                p2 = population[np.random.choice(sorted_indices[:25])]
-                next_gen.append(crossover(p1, p2))
-            elif r < 0.95:
-                p = population[np.random.choice(sorted_indices[:50])].copy()
-                next_gen.append(mutate(p))
-            else:
-                next_gen.append(generate_random_tree(depth=3))
+    if gen % 100 == 0:
+        print(f"Gen {gen:04d} | Best MSE: {best_val.item():.4f}")
     
-    population = next_gen
-    gen += 1
+    if best_val < 0.5:
+        break
+        
+    evolve(engine, mse)
 
-x_test = np.linspace(-X_SCOPE*1.2, X_SCOPE*1.2, 200)
-y_true = target_function(x_test)
-y_pred = best_overall_tree.evaluate(x_test)
-final_expr = final_simplify(best_overall_tree)
+best_pred = engine.evaluate(x_train)[best_idx].detach().cpu().numpy()
+x_plot = x_train.cpu().numpy()
+y_true = y_train.cpu().numpy()
 
-print("-" * 30)
-print(f"Finished at Gen {gen} | Final Loss: {min_fitness:.2f}")
-print(f"Final Expression: {final_expr}")
+best_ind = engine.pop[best_idx].cpu().numpy()
+final_expr = get_final_expression(best_ind, NUM_REGS)
 
 plt.figure(figsize=(12, 7))
-plt.plot(x_test, y_true, color='black', linestyle='--', linewidth=3, alpha=0.7, label="Target", zorder=10)
-plt.plot(x_test, y_pred, color='red', linestyle='-', linewidth=2, label="GP prediction", zorder=5)
-plt.scatter(x_train, y_train, color='blue', s=15, alpha=0.4, label="Data", zorder=1)
-plt.title(f"Predicted Formula  {final_expr}")
+plt.plot(x_plot, y_true, color='black', linestyle='--', linewidth=3, alpha=0.7, label="Target", zorder=10)
+plt.plot(x_plot, best_pred, color='red', linestyle='-', linewidth=2, label="LGP GPU prediction", zorder=5)
+plt.scatter(x_plot, y_true, color='blue', s=15, alpha=0.4, label="Data", zorder=1)
+plt.title(f"Formula: {final_expr}")
 plt.legend()
 plt.grid(True, linestyle=':', alpha=0.6)
 plt.savefig('result.png', dpi=300, bbox_inches='tight')
 plt.show()
+
+print("-" * 30)
+print(f"Final Formula: {final_expr}")
